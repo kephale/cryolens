@@ -388,7 +388,7 @@ def create_trainer(
     trainer_kwargs = {
         "max_epochs": num_epochs,
         "callbacks": callbacks,
-        "accelerator": "cuda" if torch.cuda.is_available() else "cpu",  # Use "cuda" instead of "gpu" for PyTorch Lightning 2.x
+        "accelerator": "auto",  # Use "auto" to let Lightning detect the best accelerator
         "devices": "auto",
         "logger": logger if (not dist_config or dist_config.node_rank == 0) else None,
         "default_root_dir": checkpoint_dir,
