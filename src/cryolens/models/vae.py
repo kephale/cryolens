@@ -231,11 +231,17 @@ class AffinityVAE(nn.Module):
         self.mu = nn.Linear(flat_shape, latent_dims)
         self.log_var = nn.Linear(flat_shape, latent_dims)
         
-        self.pose = nn.Linear(flat_shape, pose_channels)
-        # Initialize deterministic pose close to zero
+        # Variational pose parameters
+        self.pose_mu = nn.Linear(flat_shape, pose_channels)
+        self.pose_log_var = nn.Linear(flat_shape, pose_channels)
+        
+        # Initialize pose parameters close to zero
         with torch.no_grad():
-            nn.init.normal_(self.pose.weight, mean=0.0, std=0.01)
-            nn.init.zeros_(self.pose.bias)
+            nn.init.normal_(self.pose_mu.weight, mean=0.0, std=0.01)
+            nn.init.zeros_(self.pose_mu.bias)
+            # Initialize log_var to small negative values for tight initial distribution
+            nn.init.normal_(self.pose_log_var.weight, mean=0.0, std=0.01)
+            nn.init.constant_(self.pose_log_var.bias, -2.0)  # exp(-2) ≈ 0.135
             
         self.global_weight = nn.Linear(flat_shape, 1)
 
@@ -288,7 +294,7 @@ class AffinityVAE(nn.Module):
         return device
 
     @fallback_to_cpu
-    def forward(self, x: torch.Tensor, pose: Optional[torch.Tensor] = None, global_weight: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, pose: Optional[torch.Tensor] = None, global_weight: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Forward pass through the VAE.
         
         Parameters
@@ -301,12 +307,12 @@ class AffinityVAE(nn.Module):
             
         Returns
         -------
-        Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
-            Reconstructed data, latent representation, pose, mean, and log variance
+        Tuple[torch.Tensor, ...]
+            Reconstructed data, latent representation, pose, global_weight, mean, log variance,
+            pose_mu, pose_log_var
         """
-        # When using deterministic pose, we have pose
         device = self._ensure_same_device(x, self.encoder, self.decoder, self.mu, self.log_var, 
-                                            self.pose, self.global_weight)
+                                            self.pose_mu, self.pose_log_var, self.global_weight)
         rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
         
         if rank == 0:
@@ -314,13 +320,18 @@ class AffinityVAE(nn.Module):
         
         start_time = time.time()
         
-        # Standard forward pass without rotation
-        mu, log_var, generated_pose, generated_global_weight = self.encode(x)
+        # Standard forward pass
+        mu, log_var, generated_pose_mu, generated_pose_log_var, generated_global_weight = self.encode(x)
         encode_time = time.time() - start_time
         
         z_start = time.time()
         z = self.reparameterize(mu, log_var)
         reparameterize_time = time.time() - z_start
+
+        # Reparameterize pose
+        pose_reparam_start = time.time()
+        generated_pose = self.reparameterize(generated_pose_mu, generated_pose_log_var)
+        pose_reparam_time = time.time() - pose_reparam_start
 
         # Use provided pose if available, otherwise use the generated pose
         actual_pose = pose if pose is not None else generated_pose
@@ -339,9 +350,9 @@ class AffinityVAE(nn.Module):
         total_time = time.time() - start_time
         
         if rank == 0:
-            print(f"Forward pass completed in {total_time:.3f}s (encode: {encode_time:.3f}s, reparam: {reparameterize_time:.3f}s, decode: {decode_time:.3f}s)")
+            print(f"Forward pass completed in {total_time:.3f}s (encode: {encode_time:.3f}s, reparam: {reparameterize_time:.3f}s, pose_reparam: {pose_reparam_time:.3f}s, decode: {decode_time:.3f}s)")
         
-        return x_recon, z, actual_pose, actual_global_weight, mu, log_var
+        return x_recon, z, actual_pose, actual_global_weight, mu, log_var, generated_pose_mu, generated_pose_log_var
 
     def reparameterize(
         self, mu: torch.Tensor, log_var: torch.Tensor
@@ -365,7 +376,7 @@ class AffinityVAE(nn.Module):
         return eps * std + mu
 
     @fallback_to_cpu
-    def encode(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def encode(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Encode input data to latent representation.
         
         Parameters
@@ -375,22 +386,23 @@ class AffinityVAE(nn.Module):
             
         Returns
         -------
-        Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
-            Mean, log variance, pose, and global_weight.
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+            Mean, log variance, pose_mu, pose_log_var, and global_weight.
         """
         # Ensure components are on same device
         self._ensure_same_device(x, self.encoder, self.mu, self.log_var, 
-                                self.pose, self.global_weight)
+                                self.pose_mu, self.pose_log_var, self.global_weight)
         
         encoded = self.encoder(x)
         mu = self.mu(encoded)
         log_var = self.log_var(encoded)
         
-        pose = self.pose(encoded)
+        pose_mu = self.pose_mu(encoded)
+        pose_log_var = self.pose_log_var(encoded)
             
         global_weight = self.global_weight(encoded)
         
-        return mu, log_var, pose, global_weight
+        return mu, log_var, pose_mu, pose_log_var, global_weight
 
     @fallback_to_cpu
     def decode(self, z: torch.Tensor, pose: torch.Tensor, global_weight: torch.Tensor) -> torch.Tensor:
