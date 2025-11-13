@@ -149,7 +149,7 @@ def compute_cycle_consistency_loss(
     # Collect diagnostic information
     info = {
         'pose_distance_mean': distances.mean().item(),
-        'pose_distance_std': distances.std().item(),
+        'pose_distance_std': distances.std(unbiased=False).item() if len(distances) > 1 else 0.0,
         'random_pose_norm': random_poses.norm(dim=1).mean().item(),
         'recovered_pose_norm': reencoded_pose.norm(dim=1).mean().item()
     }
