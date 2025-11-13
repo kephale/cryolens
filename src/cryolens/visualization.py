@@ -241,7 +241,7 @@ class VisualizationCallback(Callback):
                     
                     # Get standard output
                     output = pl_module(subvolume.unsqueeze(0))  # Add batch dimension
-                    reconstructed, z, generated_pose, global_weight, mu, log_var = output
+                    reconstructed, z, generated_pose, global_weight, mu, log_var, pose_mu, pose_log_var = output
                     
                     # Use generated pose if none returned from forward pass
                     pose = generated_pose
