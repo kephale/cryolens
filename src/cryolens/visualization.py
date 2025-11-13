@@ -90,11 +90,27 @@ class VisualizationPlotter:
             source_type = sample.get('source_type', 'unknown')
             samples_by_source[source_type].append(sample)
         
-        # Add molecule header with count of source types
+        # Compute pose statistics across all samples for this molecule
+        all_poses = []
+        all_pose_stds = []
+        for sample in mol_data:
+            if 'pose_info' in sample:
+                all_poses.append(sample['pose_info']['pose'])
+                all_pose_stds.append(sample['pose_info']['pose_std'])
+        
+        pose_stats_str = ""
+        if all_poses:
+            all_poses = np.array(all_poses)
+            all_pose_stds = np.array(all_pose_stds)
+            pose_var = np.var(all_poses, axis=0).mean()
+            pose_std_mean = all_pose_stds.mean()
+            pose_stats_str = f" | Pose var: {pose_var:.3f}, σ_mean: {pose_std_mean:.3f}"
+        
+        # Add molecule header with count of source types and pose statistics
         source_counts = {source: len(samples) for source, samples in samples_by_source.items()}
         source_info = ", ".join([f"{source}: {count}" for source, count in source_counts.items()])
         plt.figtext(0.02, 1 - (base_row - 0.5) / gs.get_geometry()[0],
-                   f'Molecule {mol_id} ({source_info})', ha='left', va='bottom', fontsize=10)
+                   f'Molecule {mol_id} ({source_info}){pose_stats_str}', ha='left', va='bottom', fontsize=9)
         
         # Flatten and sort samples by source type for display
         sorted_samples = []
@@ -120,18 +136,19 @@ class VisualizationPlotter:
                 'Affinity Output': sample.get('segment_affinity_conv', np.zeros_like(sample['output']))[0]
             }
             
-            # Add source type label for the first column
+            # Add source type label and pose info for the first column
             source_type = sample.get('source_type', 'unknown')
+            pose_info = sample.get('pose_info', None)
             
-            # Plot first row
-            self._plot_volumes(fig, gs, row1_volumes, sample_base_row, source_label=source_type, row_label="Row 1")
+            # Plot first row (with pose info)
+            self._plot_volumes(fig, gs, row1_volumes, sample_base_row, source_label=source_type, row_label="Row 1", pose_info=pose_info)
             
             # Plot second row
             self._plot_volumes(fig, gs, row2_volumes, sample_base_row + 1, row_label="Row 2")
     
     def _plot_volumes(self, fig: plt.Figure, gs: plt.GridSpec, 
-                     volumes: Dict, row: int, source_label: str = None, row_label: str = None) -> None:
-        """Plot volume projections with source type information"""
+                     volumes: Dict, row: int, source_label: str = None, row_label: str = None, pose_info: dict = None) -> None:
+        """Plot volume projections with source type and pose information"""
         for vol_idx, (vol_name, vol_data) in enumerate(volumes.items()):
             projections = VolumeProjector.get_projections(vol_data)
             base_col = vol_idx * 3
@@ -149,7 +166,13 @@ class VisualizationPlotter:
                 if view_idx == 0 and vol_idx == 0:
                     # Add small text label in the corner for source type
                     if source_label:
-                        ax.text(0.02, 0.98, source_label, transform=ax.transAxes,
+                        label_text = source_label
+                        # Add pose info to first row
+                        if pose_info is not None:
+                            pose_norm = pose_info['pose_norm']
+                            pose_std_mean = pose_info['pose_std'].mean()
+                            label_text += f"\npose: {pose_norm:.2f}, σ: {pose_std_mean:.3f}"
+                        ax.text(0.02, 0.98, label_text, transform=ax.transAxes,
                               fontsize=6, va='top', ha='left', 
                               bbox=dict(boxstyle='round,pad=0.2', fc='white', alpha=0.7))
                 
@@ -246,6 +269,15 @@ class VisualizationCallback(Callback):
                     # Use generated pose if none returned from forward pass
                     pose = generated_pose
                     
+                    # Store pose information for visualization
+                    pose_info = {
+                        'pose': pose.cpu().numpy()[0],
+                        'pose_mu': pose_mu.cpu().numpy()[0],
+                        'pose_log_var': pose_log_var.cpu().numpy()[0],
+                        'pose_std': torch.exp(0.5 * pose_log_var).cpu().numpy()[0],
+                        'pose_norm': pose.norm(dim=1).cpu().numpy()[0]
+                    }
+                    
                     # Make sure pose is not None before trying to decode splats
                     if pose is None:
                         # Create default pose (zero rotation around Z axis)
@@ -295,7 +327,8 @@ class VisualizationCallback(Callback):
                         'input': subvolume.cpu().numpy(),
                         'raw_splats': raw_splats[0].cpu().numpy(),
                         'output': reconstructed[0].cpu().numpy(),
-                        'source_type': source_type
+                        'source_type': source_type,
+                        'pose_info': pose_info
                     }
                     
                     # Now get the separate segments without convolution
