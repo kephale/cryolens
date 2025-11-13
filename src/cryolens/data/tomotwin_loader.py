@@ -976,15 +976,18 @@ def create_tomotwin_dataloader(
     if rank == 0:
         logger.info(dataset.get_molecular_stats())
     
-    # Ensure minimum batch size per GPU
-    min_batch_size = 8  # Minimum required for similarity calculation
+    # Use the batch size from config without enforcing a minimum
+    # The model should handle small batches gracefully
     if dist_config:
-        # Calculate per-GPU batch size, ensuring it's at least min_batch_size
-        per_gpu_batch_size = max(min_batch_size, config.batch_size // dist_config.world_size)
-        # Adjust global batch size to maintain at least min_batch_size per GPU
-        config.batch_size = per_gpu_batch_size * dist_config.world_size
+        # Calculate per-GPU batch size for distributed training
+        per_gpu_batch_size = config.batch_size // dist_config.world_size
+        if per_gpu_batch_size < 1:
+            per_gpu_batch_size = 1
+            config.batch_size = dist_config.world_size
+            if rank == 0:
+                logger.warning(f"Batch size too small for distributed training, adjusting to {config.batch_size}")
     else:
-        per_gpu_batch_size = max(min_batch_size, config.batch_size)
+        per_gpu_batch_size = config.batch_size
     
     # Create distributed sampler if using DDP
     sampler = None
