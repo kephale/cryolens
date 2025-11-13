@@ -465,8 +465,8 @@ def create_trainer(
         })
         
         print(f"Rank {rank}:{local_rank}: Final trainer config for distributed:")
-        print(f"  devices: {trainer_kwargs['devices']}")
-        print(f"  num_nodes: {trainer_kwargs['num_nodes']}")
+        print(f"  devices: {trainer_kwargs.get('devices', 'auto')}")
+        print(f"  num_nodes: {trainer_kwargs.get('num_nodes', 1)}")
         print(f"  strategy: DDP")
         print(f"  world_size: {dist_config.world_size}")
     else:
