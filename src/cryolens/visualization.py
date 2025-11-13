@@ -93,18 +93,39 @@ class VisualizationPlotter:
         # Compute pose statistics across all samples for this molecule
         all_poses = []
         all_pose_stds = []
+        all_angles = []
+        all_axes = []
         for sample in mol_data:
             if 'pose_info' in sample:
                 all_poses.append(sample['pose_info']['pose'])
                 all_pose_stds.append(sample['pose_info']['pose_std'])
+                all_angles.append(sample['pose_info']['angle_deg'])
+                all_axes.append(sample['pose_info']['axis'])
         
         pose_stats_str = ""
         if all_poses:
             all_poses = np.array(all_poses)
             all_pose_stds = np.array(all_pose_stds)
+            all_angles = np.array(all_angles)
+            all_axes = np.array(all_axes)
+            
             pose_var = np.var(all_poses, axis=0).mean()
             pose_std_mean = all_pose_stds.mean()
-            pose_stats_str = f" | Pose var: {pose_var:.3f}, σ_mean: {pose_std_mean:.3f}"
+            angle_mean = all_angles.mean()
+            angle_std = all_angles.std()
+            
+            # Compute axis diversity (average pairwise angle between axes)
+            axis_diversity = 0.0
+            if len(all_axes) > 1:
+                axis_angles = []
+                for i in range(len(all_axes)):
+                    for j in range(i+1, len(all_axes)):
+                        cos_angle = np.dot(all_axes[i], all_axes[j])
+                        cos_angle = np.clip(cos_angle, -1.0, 1.0)
+                        axis_angles.append(np.degrees(np.arccos(np.abs(cos_angle))))
+                axis_diversity = np.mean(axis_angles) if axis_angles else 0.0
+            
+            pose_stats_str = f" | Rot: {angle_mean:.1f}°±{angle_std:.1f}°, Axis div: {axis_diversity:.1f}°, σ: {pose_std_mean:.3f}"
         
         # Add molecule header with count of source types and pose statistics
         source_counts = {source: len(samples) for source, samples in samples_by_source.items()}
@@ -169,11 +190,12 @@ class VisualizationPlotter:
                         label_text = source_label
                         # Add pose info to first row
                         if pose_info is not None:
-                            pose_norm = pose_info['pose_norm']
+                            angle_deg = pose_info['angle_deg']
+                            axis_str = pose_info['axis_str']
                             pose_std_mean = pose_info['pose_std'].mean()
-                            label_text += f"\npose: {pose_norm:.2f}, σ: {pose_std_mean:.3f}"
+                            label_text += f"\n{angle_deg:.1f}° {axis_str}\nσ: {pose_std_mean:.3f}"
                         ax.text(0.02, 0.98, label_text, transform=ax.transAxes,
-                              fontsize=6, va='top', ha='left', 
+                              fontsize=5, va='top', ha='left', 
                               bbox=dict(boxstyle='round,pad=0.2', fc='white', alpha=0.7))
                 
                 # First time through, add view labels to the top of each column
@@ -270,12 +292,41 @@ class VisualizationCallback(Callback):
                     pose = generated_pose
                     
                     # Store pose information for visualization
+                    # Assuming pose is axis-angle representation: first component is angle, rest is axis
+                    pose_np = pose.cpu().numpy()[0]
+                    pose_mu_np = pose_mu.cpu().numpy()[0]
+                    pose_log_var_np = pose_log_var.cpu().numpy()[0]
+                    pose_std_np = torch.exp(0.5 * pose_log_var).cpu().numpy()[0]
+                    
+                    # Parse axis-angle representation
+                    if len(pose_np) == 1:
+                        # Single angle, default axis
+                        angle = pose_np[0]
+                        axis = np.array([0., 0., 1.])  # Default Z-axis
+                    elif len(pose_np) == 4:
+                        # Full axis-angle: [angle, axis_x, axis_y, axis_z]
+                        angle = pose_np[0]
+                        axis = pose_np[1:]
+                        axis_norm = np.linalg.norm(axis)
+                        if axis_norm > 1e-6:
+                            axis = axis / axis_norm
+                    else:
+                        # Assume it's just axis-angle concatenated
+                        angle = np.linalg.norm(pose_np)
+                        if angle > 1e-6:
+                            axis = pose_np / angle
+                        else:
+                            axis = np.array([0., 0., 1.])
+                    
                     pose_info = {
-                        'pose': pose.cpu().numpy()[0],
-                        'pose_mu': pose_mu.cpu().numpy()[0],
-                        'pose_log_var': pose_log_var.cpu().numpy()[0],
-                        'pose_std': torch.exp(0.5 * pose_log_var).cpu().numpy()[0],
-                        'pose_norm': pose.norm(dim=1).cpu().numpy()[0]
+                        'pose': pose_np,
+                        'pose_mu': pose_mu_np,
+                        'pose_log_var': pose_log_var_np,
+                        'pose_std': pose_std_np,
+                        'pose_norm': np.linalg.norm(pose_np),
+                        'angle_deg': np.degrees(angle),
+                        'axis': axis,
+                        'axis_str': f"({axis[0]:.2f}, {axis[1]:.2f}, {axis[2]:.2f})"
                     }
                     
                     # Make sure pose is not None before trying to decode splats
