@@ -38,16 +38,36 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Visualization (not needed for training)
+viz = [
+    "matplotlib>=3.5.0",
+    "seaborn>=0.13.2",
+    "scikit-image>=0.20.0",
+]
+
+# Analysis tools
+analysis = [
+    "scikit-learn>=1.0.0",
+    "tabulate>=0.9.0",
+    "graphviz>=0.20.3",
+    "pooch>=1.8.0",
+]
+
+# Copick extras
 copick = [
-    "copick",
     "zarr>=2.16.0",
 ]
+
+# Development
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
-    "black>=23.0.0",
-    "isort>=5.12.0",
-    "flake8>=6.0.0",
+    "ruff>=0.11.10",
+]
+
+# Everything
+all = [
+    "cryolens[viz,analysis,copick,dev]",
 ]
 
 [tool.setuptools]
