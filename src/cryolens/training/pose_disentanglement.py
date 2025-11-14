@@ -11,6 +11,35 @@ import torch.nn.functional as F
 from typing import Tuple, Optional
 
 
+def gather_tensor_across_gpus(tensor: torch.Tensor) -> torch.Tensor:
+    """Gather a tensor from all GPUs in distributed training.
+    
+    Parameters
+    ----------
+    tensor : torch.Tensor
+        Tensor to gather, shape (local_batch_size, ...)
+        
+    Returns
+    -------
+    torch.Tensor
+        Concatenated tensor from all GPUs, shape (global_batch_size, ...)
+        If not in distributed mode, returns the input tensor unchanged.
+    """
+    if not torch.distributed.is_initialized():
+        return tensor
+    
+    world_size = torch.distributed.get_world_size()
+    if world_size == 1:
+        return tensor
+    
+    # Gather tensors from all GPUs
+    tensor_list = [torch.zeros_like(tensor) for _ in range(world_size)]
+    torch.distributed.all_gather(tensor_list, tensor)
+    
+    # Concatenate along batch dimension
+    return torch.cat(tensor_list, dim=0)
+
+
 def compute_pose_kld(
     pose_mu: torch.Tensor,
     pose_log_var: torch.Tensor,
@@ -161,7 +190,8 @@ def compute_pose_diversity_loss(
     pose_mu: torch.Tensor,
     mol_id: torch.Tensor,
     margin: float = 0.5,
-    metric: str = 'cosine'
+    metric: str = 'cosine',
+    gather_distributed: bool = True
 ) -> torch.Tensor:
     """Compute pose diversity loss for same structures.
     
@@ -179,6 +209,8 @@ def compute_pose_diversity_loss(
         Minimum desired distance between poses of the same structure (default: 0.5)
     metric : str
         Distance metric to use: 'cosine' or 'euclidean' (default: 'cosine')
+    gather_distributed : bool
+        Whether to gather tensors across GPUs in distributed training (default: True)
         
     Returns
     -------
@@ -197,7 +229,16 @@ def compute_pose_diversity_loss(
     For euclidean distance:
     - Loss is high when poses are close
     - Loss is low when poses are far apart
+    
+    In distributed training with gather_distributed=True, this function gathers
+    pose_mu and mol_id from all GPUs to compute diversity across the full batch.
+    This is important when batch_size/num_gpus is small.
     """
+    # Gather across GPUs if requested
+    if gather_distributed:
+        pose_mu = gather_tensor_across_gpus(pose_mu)
+        mol_id = gather_tensor_across_gpus(mol_id)
+    
     batch_size = pose_mu.shape[0]
     device = pose_mu.device
     
