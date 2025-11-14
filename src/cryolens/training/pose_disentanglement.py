@@ -157,6 +157,81 @@ def compute_cycle_consistency_loss(
     return loss, info
 
 
+def compute_pose_diversity_loss(
+    pose_mu: torch.Tensor,
+    mol_id: torch.Tensor,
+    margin: float = 0.5,
+    metric: str = 'cosine'
+) -> torch.Tensor:
+    """Compute pose diversity loss for same structures.
+    
+    Encourages different pose predictions for particles of the same structure.
+    This prevents pose collapse by ensuring that multiple instances of the
+    same structure in a batch get assigned different poses.
+    
+    Parameters
+    ----------
+    pose_mu : torch.Tensor
+        Mean of the pose distribution, shape (batch_size, pose_dims)
+    mol_id : torch.Tensor
+        Molecular IDs indicating which particles are the same structure, shape (batch_size,)
+    margin : float
+        Minimum desired distance between poses of the same structure (default: 0.5)
+    metric : str
+        Distance metric to use: 'cosine' or 'euclidean' (default: 'cosine')
+        
+    Returns
+    -------
+    torch.Tensor
+        Diversity loss (lower when poses are more diverse for same structures)
+        
+    Notes
+    -----
+    This loss computes pairwise distances between poses within each structure
+    and penalizes distances that are too small (below the margin).
+    
+    For cosine similarity:
+    - Loss is high when poses are similar (cosine ~ 1)
+    - Loss is low when poses are different (cosine ~ 0 or negative)
+    
+    For euclidean distance:
+    - Loss is high when poses are close
+    - Loss is low when poses are far apart
+    """
+    batch_size = pose_mu.shape[0]
+    device = pose_mu.device
+    
+    # Create pairwise mask for same structures
+    same_structure_mask = (mol_id.unsqueeze(1) == mol_id.unsqueeze(0))  # (B, B)
+    # Exclude diagonal (particle compared to itself)
+    same_structure_mask = same_structure_mask & ~torch.eye(batch_size, dtype=torch.bool, device=device)
+    
+    if not same_structure_mask.any():
+        # No pairs of same structure in batch
+        return torch.tensor(0.0, device=device, requires_grad=True)
+    
+    if metric == 'cosine':
+        # Compute cosine similarity matrix (higher = more similar)
+        pose_normalized = F.normalize(pose_mu, dim=1)
+        similarity_matrix = torch.mm(pose_normalized, pose_normalized.t())  # (B, B)
+        # Penalize high similarity for same structures (want them to be different)
+        loss = similarity_matrix[same_structure_mask].mean()
+    elif metric == 'euclidean':
+        # Compute pairwise euclidean distances
+        # ||a - b||^2 = ||a||^2 + ||b||^2 - 2<a,b>
+        pose_norm_sq = (pose_mu ** 2).sum(dim=1, keepdim=True)  # (B, 1)
+        distance_matrix_sq = pose_norm_sq + pose_norm_sq.t() - 2 * torch.mm(pose_mu, pose_mu.t())
+        distance_matrix = torch.sqrt(torch.clamp(distance_matrix_sq, min=1e-8))  # (B, B)
+        # Penalize small distances (want them to be far apart)
+        # Use margin-based loss: max(0, margin - distance)
+        distances = distance_matrix[same_structure_mask]
+        loss = F.relu(margin - distances).mean()
+    else:
+        raise ValueError(f"Unknown metric: {metric}")
+    
+    return loss
+
+
 class PoseScheduler:
     """Scheduler for gradually increasing pose loss weights during training.
     
