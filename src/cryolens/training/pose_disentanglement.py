@@ -14,6 +14,9 @@ from typing import Tuple, Optional
 def gather_tensor_across_gpus(tensor: torch.Tensor) -> torch.Tensor:
     """Gather a tensor from all GPUs in distributed training.
     
+    CRITICAL: This is a COLLECTIVE operation that MUST be called by all ranks simultaneously.
+    Never call this inside conditional logic that might differ across ranks.
+    
     Parameters
     ----------
     tensor : torch.Tensor
@@ -31,6 +34,10 @@ def gather_tensor_across_gpus(tensor: torch.Tensor) -> torch.Tensor:
     world_size = torch.distributed.get_world_size()
     if world_size == 1:
         return tensor
+    
+    # CRITICAL: This is a collective operation - all ranks must call it
+    # Make tensor contiguous to avoid issues
+    tensor = tensor.contiguous()
     
     # Gather tensors from all GPUs
     tensor_list = [torch.zeros_like(tensor) for _ in range(world_size)]
@@ -233,14 +240,25 @@ def compute_pose_diversity_loss(
     In distributed training with gather_distributed=True, this function gathers
     pose_mu and mol_id from all GPUs to compute diversity across the full batch.
     This is important when batch_size/num_gpus is small.
+    
+    CRITICAL: When gather_distributed=True, ALL ranks must call this function
+    with the same gather_distributed value to avoid deadlocks. The gathering
+    happens BEFORE any early exit checks to maintain synchronization.
     """
-    # Gather across GPUs if requested
-    if gather_distributed:
+    # CRITICAL FIX: Always gather FIRST before any conditional checks
+    # This ensures all ranks call the collective operation simultaneously
+    if gather_distributed and torch.distributed.is_initialized():
         pose_mu = gather_tensor_across_gpus(pose_mu)
         mol_id = gather_tensor_across_gpus(mol_id)
     
+    # NOW we can safely do early exit checks after gathering
     batch_size = pose_mu.shape[0]
     device = pose_mu.device
+    
+    # Early exit check - but AFTER gathering to maintain sync
+    if batch_size < 2:
+        # No pairs possible
+        return torch.tensor(0.0, device=device, requires_grad=True)
     
     # Create pairwise mask for same structures
     same_structure_mask = (mol_id.unsqueeze(1) == mol_id.unsqueeze(0))  # (B, B)
@@ -248,7 +266,7 @@ def compute_pose_diversity_loss(
     same_structure_mask = same_structure_mask & ~torch.eye(batch_size, dtype=torch.bool, device=device)
     
     if not same_structure_mask.any():
-        # No pairs of same structure in batch
+        # No pairs of same structure in batch - but all ranks computed this after gathering
         return torch.tensor(0.0, device=device, requires_grad=True)
     
     if metric == 'cosine':
