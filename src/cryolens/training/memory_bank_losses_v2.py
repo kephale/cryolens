@@ -6,6 +6,7 @@ Key improvements:
 2. Memory banks activate after a warmup period
 3. Deterministic behavior across runs
 4. Always uses memory bank embeddings for all structures once active
+5. Includes distributed gathering for multi-GPU training
 """
 
 import torch
@@ -13,6 +14,35 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from typing import Dict, Optional, Tuple
+
+
+def gather_tensor_across_gpus(tensor: torch.Tensor) -> torch.Tensor:
+    """Gather a tensor from all GPUs in distributed training.
+    
+    Parameters
+    ----------
+    tensor : torch.Tensor
+        Tensor to gather, shape (local_batch_size, ...)
+        
+    Returns
+    -------
+    torch.Tensor
+        Concatenated tensor from all GPUs, shape (global_batch_size, ...)
+        If not in distributed mode, returns the input tensor unchanged.
+    """
+    if not torch.distributed.is_initialized():
+        return tensor
+    
+    world_size = torch.distributed.get_world_size()
+    if world_size == 1:
+        return tensor
+    
+    # Gather tensors from all GPUs
+    tensor_list = [torch.zeros_like(tensor) for _ in range(world_size)]
+    torch.distributed.all_gather(tensor_list, tensor)
+    
+    # Concatenate along batch dimension
+    return torch.cat(tensor_list, dim=0)
 
 
 class TrainingAwareMemoryBank:
@@ -283,7 +313,8 @@ class ContrastiveAffinityLossWithMemoryV2(nn.Module):
         activation_mode: str = "steps",
         memory_weight: float = 0.5,
         crossover_prob: float = 0.0,
-        crossover_noise_std: float = 0.01
+        crossover_noise_std: float = 0.01,
+        gather_distributed: bool = True
     ):
         """
         Initialize improved memory-enhanced contrastive loss.
@@ -308,6 +339,8 @@ class ContrastiveAffinityLossWithMemoryV2(nn.Module):
             Probability of crossover with memory bank embeddings (default: 0.0, disabled)
         crossover_noise_std : float
             Noise std for crossover mutation (default: 0.01)
+        gather_distributed : bool
+            Whether to gather tensors across GPUs before computing loss (default: True)
         """
         super().__init__()
         
@@ -320,6 +353,7 @@ class ContrastiveAffinityLossWithMemoryV2(nn.Module):
         self.memory_weight = memory_weight
         self.crossover_prob = crossover_prob
         self.crossover_noise_std = crossover_noise_std
+        self.gather_distributed = gather_distributed
         
         # Background similarity values
         self.background_sim = 0.2
@@ -369,6 +403,19 @@ class ContrastiveAffinityLossWithMemoryV2(nn.Module):
             # Ensure inputs are contiguous
             y_true = y_true.contiguous().to(self.device)
             y_pred = y_pred.contiguous().to(self.device)
+            
+            # Gather across GPUs if enabled
+            if self.gather_distributed:
+                local_batch_size = y_true.shape[0]
+                y_true = gather_tensor_across_gpus(y_true)
+                y_pred = gather_tensor_across_gpus(y_pred)
+                
+                # Log gathering stats periodically
+                if not hasattr(self, '_gather_counter'):
+                    self._gather_counter = 0
+                self._gather_counter += 1
+                if self._gather_counter % 100 == 0:
+                    print(f"[Memory Contrastive Loss] Gathered batch: local={local_batch_size}, global={y_true.shape[0]}")
 
             # Handle batch size < 2
             if y_true.shape[0] < 2:
@@ -561,7 +608,8 @@ class AffinityCosineLossWithMemoryV2(nn.Module):
         activation_mode: str = "steps",
         memory_weight: float = 0.5,
         crossover_prob: float = 0.0,
-        crossover_noise_std: float = 0.01
+        crossover_noise_std: float = 0.01,
+        gather_distributed: bool = True
     ):
         """
         Initialize improved memory-enhanced cosine loss.
@@ -584,6 +632,8 @@ class AffinityCosineLossWithMemoryV2(nn.Module):
             Probability of crossover with memory bank embeddings (default: 0.0, disabled)
         crossover_noise_std : float
             Noise std for crossover mutation (default: 0.01)
+        gather_distributed : bool
+            Whether to gather tensors across GPUs before computing loss (default: True)
         """
         super().__init__()
         
@@ -597,6 +647,7 @@ class AffinityCosineLossWithMemoryV2(nn.Module):
         self.memory_weight = memory_weight
         self.crossover_prob = crossover_prob
         self.crossover_noise_std = crossover_noise_std
+        self.gather_distributed = gather_distributed
         
         # Background similarity values
         self.background_sim = 0.2
@@ -633,6 +684,19 @@ class AffinityCosineLossWithMemoryV2(nn.Module):
             # Ensure inputs are contiguous
             y_true = y_true.contiguous().to(self.device)
             y_pred = y_pred.contiguous().to(self.device)
+            
+            # Gather across GPUs if enabled
+            if self.gather_distributed:
+                local_batch_size = y_true.shape[0]
+                y_true = gather_tensor_across_gpus(y_true)
+                y_pred = gather_tensor_across_gpus(y_pred)
+                
+                # Log gathering stats periodically
+                if not hasattr(self, '_gather_counter'):
+                    self._gather_counter = 0
+                self._gather_counter += 1
+                if self._gather_counter % 100 == 0:
+                    print(f"[Memory Cosine Loss] Gathered batch: local={local_batch_size}, global={y_true.shape[0]}")
 
             # Handle batch size < 2
             if y_true.shape[0] < 2:
