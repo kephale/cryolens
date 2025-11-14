@@ -8,6 +8,35 @@ import torch.nn.functional as F
 import numpy as np
 
 
+def gather_tensor_across_gpus(tensor: torch.Tensor) -> torch.Tensor:
+    """Gather a tensor from all GPUs in distributed training.
+    
+    Parameters
+    ----------
+    tensor : torch.Tensor
+        Tensor to gather, shape (local_batch_size, ...)
+        
+    Returns
+    -------
+    torch.Tensor
+        Concatenated tensor from all GPUs, shape (global_batch_size, ...)
+        If not in distributed mode, returns the input tensor unchanged.
+    """
+    if not torch.distributed.is_initialized():
+        return tensor
+    
+    world_size = torch.distributed.get_world_size()
+    if world_size == 1:
+        return tensor
+    
+    # Gather tensors from all GPUs
+    tensor_list = [torch.zeros_like(tensor) for _ in range(world_size)]
+    torch.distributed.all_gather(tensor_list, tensor)
+    
+    # Concatenate along batch dimension
+    return torch.cat(tensor_list, dim=0)
+
+
 class ContrastiveAffinityLoss(nn.Module):
     """
     Contrastive affinity loss that handles background samples.
@@ -30,9 +59,12 @@ class ContrastiveAffinityLoss(nn.Module):
         Ratio of latent dimensions to use (default: 0.75).
     margin : float
         Margin for dissimilar pairs in contrastive loss (default: 4.0).
+    gather_distributed : bool
+        Whether to gather tensors across GPUs before computing loss (default: True).
     """
 
-    def __init__(self, lookup: torch.Tensor, device: torch.device, latent_ratio: float = 0.75, margin: float = 4.0):
+    def __init__(self, lookup: torch.Tensor, device: torch.device, latent_ratio: float = 0.75, 
+                 margin: float = 4.0, gather_distributed: bool = True):
         super().__init__()
         # Register lookup buffer (similarity matrix)
         lookup = lookup.clone().detach().contiguous()
@@ -40,15 +72,18 @@ class ContrastiveAffinityLoss(nn.Module):
         self.device = device
         self.latent_ratio = latent_ratio
         self.margin = margin
+        self.gather_distributed = gather_distributed
         
         # Background similarity values (in [0,1] range)
         self.background_sim = 0.2  # Low similarity between background samples
         self.background_other_sim = 0.01  # Very low similarity between background and objects
         
-        print(f"AffinityCosineLoss initialized:")
+        print(f"ContrastiveAffinityLoss initialized:")
         print(f"  Latent ratio: {self.latent_ratio}")
+        print(f"  Margin: {self.margin}")
         print(f"  Background-background similarity: {self.background_sim}")
         print(f"  Background-object similarity: {self.background_other_sim}")
+        print(f"  Gather distributed: {self.gather_distributed}")
 
     def forward(self, y_true: torch.Tensor, y_pred: torch.Tensor, per_sample: bool = False) -> torch.Tensor:
         """
@@ -74,6 +109,19 @@ class ContrastiveAffinityLoss(nn.Module):
             # Ensure inputs are contiguous
             y_true = y_true.contiguous().to(self.device)
             y_pred = y_pred.contiguous().to(self.device)
+            
+            # Gather across GPUs if enabled
+            if self.gather_distributed:
+                local_batch_size = y_true.shape[0]
+                y_true = gather_tensor_across_gpus(y_true)
+                y_pred = gather_tensor_across_gpus(y_pred)
+                
+                # Log gathering stats periodically
+                if not hasattr(self, '_gather_counter'):
+                    self._gather_counter = 0
+                self._gather_counter += 1
+                if self._gather_counter % 100 == 0:
+                    print(f"[Contrastive Loss] Gathered batch: local={local_batch_size}, global={y_true.shape[0]}")
 
             # Handle batch size < 2
             if y_true.shape[0] < 2:
@@ -349,9 +397,12 @@ class AffinityCosineLoss(nn.Module):
         Device to run computation on.
     latent_ratio : float
         Ratio of latent dimensions to use (default: 0.75).
+    gather_distributed : bool
+        Whether to gather tensors across GPUs before computing loss (default: True).
     """
 
-    def __init__(self, lookup: torch.Tensor, device: torch.device, latent_ratio: float = 0.75):
+    def __init__(self, lookup: torch.Tensor, device: torch.device, latent_ratio: float = 0.75,
+                 gather_distributed: bool = True):
         super().__init__()
         # Register lookup buffer
         lookup = lookup.clone().detach().contiguous()
@@ -360,6 +411,7 @@ class AffinityCosineLoss(nn.Module):
         self.cos = nn.CosineSimilarity(dim=1, eps=1e-8)
         self.l1loss = nn.L1Loss(reduction="none")  # Use "none" for per-sample loss
         self.latent_ratio = latent_ratio
+        self.gather_distributed = gather_distributed
         
         # Background similarity values (in [0,1] range)
         self.background_sim = 0.2  # Low similarity between background samples
@@ -369,6 +421,7 @@ class AffinityCosineLoss(nn.Module):
         print(f"  Latent ratio: {self.latent_ratio}")
         print(f"  Background-background similarity: {self.background_sim}")
         print(f"  Background-object similarity: {self.background_other_sim}")
+        print(f"  Gather distributed: {self.gather_distributed}")
 
     def forward(self, y_true: torch.Tensor, y_pred: torch.Tensor, per_sample: bool = False) -> torch.Tensor:
         """Compute affinity loss with background handling.
@@ -393,6 +446,19 @@ class AffinityCosineLoss(nn.Module):
             # Ensure inputs are contiguous
             y_true = y_true.contiguous().to(self.device)
             y_pred = y_pred.contiguous().to(self.device)
+            
+            # Gather across GPUs if enabled
+            if self.gather_distributed:
+                local_batch_size = y_true.shape[0]
+                y_true = gather_tensor_across_gpus(y_true)
+                y_pred = gather_tensor_across_gpus(y_pred)
+                
+                # Log gathering stats periodically
+                if not hasattr(self, '_gather_counter'):
+                    self._gather_counter = 0
+                self._gather_counter += 1
+                if self._gather_counter % 100 == 0:
+                    print(f"[Cosine Loss] Gathered batch: local={local_batch_size}, global={y_true.shape[0]}")
 
             # Handle batch size < 2
             if y_true.shape[0] < 2:
